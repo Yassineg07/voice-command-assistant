@@ -1,0 +1,30 @@
+# Build outputs (matches directories in any subfolder)
+Debug/
+Release/
+build/
+
+# Intermediate build and output files
+*.o
+*.d
+*.su
+*.list
+*.elf
+*.a
+*.bin
+*.hex
+*.map
+*.log
+*.bak
+*.tmp
+
+# STM32CubeIDE / Eclipse specific artifacts
+*.launch
+.metadata/
+.mxproject
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Agent config files
+AGENT.md
