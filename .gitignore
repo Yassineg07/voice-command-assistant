@@ -9,7 +9,6 @@ build/
 *.su
 *.list
 *.elf
-*.a
 *.bin
 *.hex
 *.map
@@ -28,3 +27,8 @@ Thumbs.db
 
 # Agent config files
 AGENT.md
+
+# others
+speech_model/
+backup/
+training/
