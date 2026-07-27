@@ -37,10 +37,10 @@ void MFCC_Init(void) {
   // 3. Dynamically construct the Mel Filterbank matrix!
   // This avoids having to paste 1000 lines of weird constants.
   // It runs exactly once at boot and takes ~5KB of RAM.
-  float sample_rate = 16000.0f;
+  float sample_rate = 8000.0f;
   int num_bins = MFCC_FFT_LEN / 2;
-  float mel_min = hz_to_mel(20.0f);              // Human hearing floor
-  float mel_max = hz_to_mel(sample_rate / 2.0f); // Hardware ceiling (Nyquist)
+  float mel_min = hz_to_mel(20.0f);   // Human hearing floor
+  float mel_max = hz_to_mel(4000.0f); // Hardware ceiling (Nyquist)
 
   float mel_points[MFCC_NUM_BANDS + 2];
   for (int i = 0; i < MFCC_NUM_BANDS + 2; i++) {

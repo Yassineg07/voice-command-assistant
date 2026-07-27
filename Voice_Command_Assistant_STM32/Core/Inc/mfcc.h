@@ -3,8 +3,8 @@
 
 #include <stdint.h>
 
-#define MFCC_FRAME_LEN 512
-#define MFCC_FFT_LEN 512
+#define MFCC_FRAME_LEN 256
+#define MFCC_FFT_LEN 256
 #define MFCC_NUM_BANDS 10
 
 void MFCC_Init(void);

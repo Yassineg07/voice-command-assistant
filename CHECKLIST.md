@@ -119,8 +119,8 @@ Detailed, phase-by-phase checklist derived from [SPECS.md](./SPECS.md). Check of
 - [✔] Initialize the filter using `PDMFilter_InitStruct` inside `StartTaskAudio` before the `for(;;)` loop. *(V2.1.0 API Config: 16000 Hz Fs, 10Hz HP / 4000.0f LP)*.
   - *Crucial note:* `Fs = 16000` is required to pass the library binary checks. `LP_HZ = 4000.0f` forces true 8kHz physical anti-aliasing!
 - [✔] Inside the `StartTaskAudio` `for(;;)` loop: Call `xStreamBufferReceive()` to sleep until 128 bytes (one half-buffer) arrive from the ISR.
-- [✔] Execute `__builtin_bswap16` to correct STM32 Endianness, run `PDM_Filter_64_LSB`, and implement a **2:1 Software Decimation Loop** (`pcm[i*2]`). This pitch-drops hardware 32kHz native into pristine 16kHz for the AI.
-- [✔] Pass exactly 8 pristine decimated samples through the Dynamic Silence Gate (`±30 bounds`) into the rolling buffer.
+- [✔] Execute `__builtin_bswap16` to correct STM32 Endianness, run `PDM_Filter_64_LSB`, and implement a **2:1 Software Decimation Loop** (`pcm[i*2]`). This pitch-drops the hardware 32kHz native stream into pristine **8kHz** for the AI pipeline.
+- [✔] Accumulate exactly 8 pristine decimated samples per ISR callback into the rolling buffer. Track absolute peak (`abs(s)`) in `print_peak` (UART logger, resets every 8ms) and `frame_peak` (VAD, resets every 20ms/160 samples) — **these must be two separate variables** to prevent the logger from erasing peak data before the VAD reads it.
 
 ### 1a.3 — MFCC Feature Extraction
 
@@ -138,10 +138,12 @@ Detailed, phase-by-phase checklist derived from [SPECS.md](./SPECS.md). Check of
   - **2. FFT:** Convert the time-domain waveform into raw frequency magnitudes using `arm_rfft_fast_f32`.
   - **3. Mel Filterbank:** Group raw frequencies into 10 buckets weighted by how human ears perceive pitch.
   - **4. Log Compression:** Apply `10.0f * log10f()` to flatten massive volume differences (matching Python `librosa` mathematically exactly).
-- [✔] Implement a Rolling Buffer (Stride Math) in the Audio Task to continually feed 512-sample frames (`MFCC_FRAME_LEN=512`) to the MFCC.
-  - **CRITICAL:** FFT work buffers inside `MFCC_Compute` must be declared `static` to live in global BSS memory.
-  - **MicGain:** `PDM_Filter_64_LSB` gain argument is currently `1`. The Dynamic Signal Gate completely filters out static DC hum before the feature space sees it.
-- [✔] Feature queue: simplified — the MFCC runs in-task on the rolling buffer rather than a separate feature queue for Phase 1. Feature queues will be added in Phase 2 when the inference task is decoupled.
+- [✔] Implement a Rolling Buffer (Stride Math) in the Audio Task to continually accumulate 160-sample hops (`hop_length=160`) into a 256-sample window (`MFCC_FRAME_LEN=256`, `N_FFT=256`).
+  - **CRITICAL:** FFT work buffers inside `MFCC_Compute` must be declared `static` to live in global BSS memory — declaring them on the stack causes stack overflow.
+  - **MicGain:** `PDM_Filter_64_LSB` gain argument is `1`.
+  - **Mel Filterbank config:** `sample_rate=8000`, `num_filters=10`, `fmin=0`, `fmax=4000` (Nyquist of 8kHz stream).
+  - **Log compression:** `10.0f * log10f()` — matches Python `librosa.power_to_db` exactly.
+- [✔] Audio Task pushes one completed 10-float MFCC frame (40 bytes) to `MfccQueueHandle` every 160 samples (every 20ms). AI Task is entirely separate — see 1b.3 for rationale.
 - [✔] Dump verified with ASCII VU meter: raw PCM loudness meter shows clear voice vs silence discrimination.
 
 ### ✅ Phase 1a Acceptance
@@ -151,41 +153,73 @@ Detailed, phase-by-phase checklist derived from [SPECS.md](./SPECS.md). Check of
 
 ---
 
-## Phase 1b — First AI Deployment (Pretrained Model)
-Goal: Use a pretrained TF Lite Micro model (Google Speech Commands) to implement a "Wake Word -> Action" state machine.
+## Phase 1b — First AI Deployment (Custom Trained Model)
 
-### 1b.1 — Model Integration
-- [ ] Obtain a pretrained `.tflite` model trained on the Google Speech Commands dataset (which includes 'up', 'on', 'off', etc.).
-- [ ] Import the model into the STM32 project. We will use either standard TFLite Micro source files OR ST's X-CUBE-AI (which efficiently compiles the `.tflite` directly into optimized C code).
+> **Goal:** Deploy your own trained model, build a stable, event-driven inference pipeline, and harden it against real-world edge cases.
 
-### 1b.2 — Inference Task
-- [x] Gather 49 sequential MFCC frames in the Audio Task (equivalent to exactly 1 second of audio).
-- [x] Pass the 49x10 2D array to the AI Inference Task.
-- [x] Run the model and read the `softmax` probability array to get the top prediction.
+### 1b.1 — Model Deployment via STM32Cube AI Studio
+- [✔] Trained custom 3-class model (`up`, `go`, `noise`) in Python using Google Speech Commands + custom mic recordings.
+- [✔] Exported `.h5` model from Keras and deployed through STM32Cube AI Studio (STEDGEAI), generating optimized C files.
+- [✔] Integrated generated STAI C files into CubeIDE. Confirmed `stai_network_init`, `stai_network_run` resolve at link time.
+- [✔] Declared STAI buffers (`ai_input_buf`, `ai_output_buf`, `ai_activations`, `ai_network_ctx`) in `USER CODE BEGIN Variables`. Network constants come from generated headers.
+- [✔] Created `myTaskAI` in `.ioc` (priority = Below Normal, stack = 512 words).
 
-### 1b.3 — Voice State Machine
-- [ ] **State 1 (Sleep):** Continuously listen for the Wake Word (`"up"`).
-- [ ] **Wake Event:** When `"up"` logic > threshold, turn on indicator LEDs, and switch state.
-- [ ] **State 2 (Awake):** Listen for Action Words (`"on"`) with a 10-second timeout.
-- [ ] **Action Event:** When `"on"` > threshold, fire all 4 LEDs for 2 seconds, then reset to State 1.
-- [ ] **Timeout Event:** If 10 seconds pass without a recognized word, turn off indicator LEDs and reset to State 1.
-> **Goal:** End-to-end flat voice-controlled LED with a pretrained model. Zero ML risk.
+### 1b.2 — Dedicated AI Task Architecture (`freertos.c`)
+- [✔] Created **`myTaskAI`** as a completely separate FreeRTOS task (priority = Below Normal, stack = 512 words) in the `.ioc`.
+  - **Why a dedicated task?** `stai_network_run` is a heavy synchronous computation (potentially 50–300ms). Running it inside `StartTaskAudio` would stall the Audio Task's real-time DMA loop, causing the stream buffer to overflow and drop PDM packets. A separate task allows the Audio Task to keep streaming at full speed while the AI processes independently.
+  - **Why Below Normal priority?** The Audio Task (Above Normal) and Logger Task must never be preempted by inference. The AI is a background consumer — correctness matters more than latency.
+- [✔] AI Task idles at 0% CPU blocked on `osMessageQueueGet(MfccQueueHandle, ...)` during silence.
+- [✔] On each 20ms wakeup: shifts the 49×10 history matrix left by one row, inserts the new 10-float MFCC frame on the right. This keeps a continuously sliding 1-second acoustic snapshot of audio in real time.
+- [✔] AI history matrix pre-filled with `-80.0f` (log-mel silence floor, matching Python's silent padding baseline) at boot and reset to `-80.0f` after every inference.
 
-### 1b.1 — Model Deployment
-- [ ] Download a pretrained Google Speech Commands TFLite model (or grab the TF Lite Micro KWS example model)
-- [ ] Open STM32Cube AI Studio → import `.tflite` → select STM32F407 target → generate C files
-- [ ] Add generated C files to the CubeIDE project
-- [ ] Create the Inference Task — runs model on every MFCC feature matrix from the Feature Queue
-- [ ] Verify: say a recognized word → correct label + confidence prints over UART
+### 1b.3 — Pipeline Math (`mfcc.h` / `mfcc.c`)
+- [✔] `MFCC_FRAME_LEN = 256` — FFT window size, must match Python `N_FFT=256`.
+- [✔] `MFCC_NUM_BANDS = 10` — number of Mel filter bands.
+- [✔] `hop_length = 160` — rolling buffer stride, must match Python `hop_length=160`.
+- [✔] Mel Filterbank: `sample_rate=8000`, `fmax=4000` (Nyquist of the 8kHz decimated stream).
+- [✔] Log compression: `10.0f * log10f(power)` — mathematically identical to Python `librosa.power_to_db`.
+- [✔] Z-Score normalization applied per-band across the 49 time steps before inference, matching Python training preprocessing.
 
-### 1b.2 — Action Task (LED control)
-- [ ] Create the Action Task
-- [ ] Map recognized commands to onboard LEDs (e.g. "on"/"off" toggles LD4)
-- [ ] Verify: end-to-end voice → LED toggle works reliably
+### 1b.4 — VAD Security Guard Architecture (`freertos.c` → `StartTaskAI`)
+- [✔] VAD state machine lives entirely inside the **AI Task** (not Audio Task) so it never blocks the real-time audio stream.
+- [✔] Volume per frame (`frame_peak`, an `int16_t`) is pushed into `VolQueueHandle` by the Audio Task alongside each MFCC frame. The AI Task pops both queues in lock-step — volume is always guaranteed to match the exact MFCC slice being evaluated.
+- [✔] **Adaptive Gravity EMA tracking:** The VAD tracks ambient room volume continuously during IDLE using `noise_floor = noise_floor * 0.95 + current_vol * 0.05`.
+- [✔] VAD states:
+  - **IDLE:** Evaluates against `dynamic_threshold = noise_floor + vad_margin(10)`. Physically bounded strictly by `vad_min_floor(20)`. Increments `loud_count` if breached. 3 consecutive breaches → enter CAPTURING.
+  - **CAPTURING:** Tracking math freezes. 3 consecutive quiet frames (`< dynamic_threshold`) → concludes word and runs inference.
+- [✔] On inference trigger: Z-Score normalize the 49×10 matrix per-band → `stai_network_run` → print `up:XX% go:XX% noise:XX%` → scrub history to `-80.0f` → return to IDLE.
+
+### 1b.4 — Edge Case Hardening (in `freertos.c`)
+- [✔] **Race Condition Fixed:** Volume passed through dedicated `VolQueueHandle` (not a volatile global). Volume is always atomically paired to its exact MFCC frame, regardless of inference lag.
+- [✔] **Dual Queue Architecture in `.ioc`:** `MfccQueue` (16 × 40 bytes) and `VolQueue` (16 × 2 bytes) both GUI-visible in the FreeRTOS configurator tab — survives all future code regenerations.
+- [✔] **Infinite Sentence Overflow Guard & Instant Snap:** `capture_frame_count` in VAD. If CAPTURING exceeds **45 frames (~900ms)**, inference is force-triggered. To survive sudden loud continuous noise, the baseline `noise_floor` is instantly snapped upwards to match the extreme noise level.
+- [✔] **Refractory Lockout Penalty:** Upon hitting an overflow snap, the VAD tracking logic is forcefully locked out for 2 full seconds (100 frames), using that time to let the EMA mathematically stabilize onto the new loud baseline before re-arming.
+- [✔] **Echo / Contamination Guard:** Full 49×10 history matrix scrubbed to `-80.0f` after every inference. Prevents acoustic tail of previous word bleeding into the next inference window.
+- [✔] **Boot-Noise Flush:** 2-second `osDelay` at boot followed by queue flushes prevents the AI from evaluating hardware initialization static.
+
+### 1b.5 — LED State Machine (Diagnostic)
+- [✔] **Idle State:** Blue LED ON when listening.
+- [✔] **"up" Event:** Green LED ON for 2 seconds (Blue OFF).
+- [✔] **"go" Event:** Orange LED ON for 2 seconds (Blue OFF).
+- [✔] **Override:** If a new word is detected while a word LED is active, the active LED switches immediately and the 2-second timer restarts.
+- [✔] **Timer Mechanics:** Piggybacks on the 20ms AI block loop. No extra RTOS tasks or delays used.
 
 ### ✅ Phase 1b Acceptance
-- [ ] **Pretrained KWS model running, flat pipeline, LED reacts to voice**
-- [ ] **Pointer-based queues confirmed (no buffer copies)**
+- [✔] **Custom 3-class KWS model running on STM32F407 via STAI engine**
+- [✔] **Serial prints: `up:XX% go:XX% noise:XX%` on every detected word**
+- [✔] **VAD correctly gates: `[VAD] Start...` → `[VAD] End...` → predictions**
+- [✔] **Near-zero false positives during continuous silence**
+- [✔] **Asynchronous race condition eliminated via dual-queue design**
+- [✔] **Infinite-sentence overflow guarded via 900ms capture timeout**
+- [✔] **LED State Machine wired and visually reacting to NN predictions**
+
+> ⚠️ **Future Expansion — Long Words (e.g. "Hey Google", "Wake Up"):**
+> To support commands longer than ~900ms, changes must begin **at the Python training level**, not just in C:
+> 1. In Python: change audio window from 1.0s → 2.0s. Matrix grows from `49×10` → `99×10`.
+> 2. Train a new model on the wider matrix. Re-export via STAI to CubeIDE.
+> 3. `STAI_NETWORK_IN_1_HEIGHT` updates automatically in generated headers.
+> 4. Only then update the C timeout from `capture_frame_count > 45` → `> 90`.
+> ⚠️ Changing only the C timeout without retraining causes early audio to fall off the matrix edge before inference — guaranteed mispredictions.
 
 ---
 
@@ -194,18 +228,18 @@ Goal: Use a pretrained TF Lite Micro model (Google Speech Commands) to implement
 > **Goal:** Replace pretrained model with models you trained yourself.
 
 ### 2a.1 — Command Model
-- [x] Collect and prepare dataset (Google Speech Commands + your own voice recordings)
-- [x] Design and train command model (DS-CNN, Keras)
-- [x] Convert to `.tflite` with INT8 quantization
-- [x] Deploy via STM32Cube AI Studio → C files → CubeIDE
-- [x] Verify parity mapping: Python `1e-8f` dataset generation meticulously mapped against MCU BSS arrays!
+- [ ] Collect and prepare dataset (Google Speech Commands + your own voice recordings)
+- [ ] Design and train command model (DS-CNN, Keras)
+- [ ] Convert to `.tflite` with INT8 quantization
+- [ ] Deploy via STM32Cube AI Studio → C files → CubeIDE
+- [ ] Verify parity mapping: Python `1e-8f` dataset generation meticulously mapped against MCU BSS arrays!
 
 ### 2a.2 — Wake-Word Model
-- [x] Record wake-word samples (few hundred utterances, varied distance/angle)
-- [x] Augment with background noise
-- [x] Train tiny wake-word model (3 classes: silence / unknown / wake-word)
-- [x] Convert to `.tflite` with INT8 quantization
-- [x] Deploy via STM32Cube AI Studio → C files → CubeIDE
+- [ ] Record wake-word samples (few hundred utterances, varied distance/angle)
+- [ ] Augment with background noise
+- [ ] Train tiny wake-word model (3 classes: silence / unknown / wake-word)
+- [ ] Convert to `.tflite` with INT8 quantization
+- [ ] Deploy via STM32Cube AI Studio → C files → CubeIDE
 
 ---
 
@@ -213,9 +247,12 @@ Goal: Use a pretrained TF Lite Micro model (Google Speech Commands) to implement
 
 > **Goal:** Full wake-word + command cascade with a proper state machine.
 
-### 2b.1 — Orchestrator Task
+### 2b.1 — Orchestrator Task & Voice State Machine
 - [ ] Create the Orchestrator Task — sole owner of system state
-- [ ] Implement state machine: `LISTENING → AWAKE → ACTING → LISTENING`
+- [ ] Implement advanced state machine: `LISTENING (Sleep) → AWAKE → ACTING → LISTENING`
+- [ ] **Sleep Mode:** Continuously listen for Wake Word. On detect → turn on indicator LEDs → switch to AWAKE.
+- [ ] **Awake Mode:** Listen for Command Word with a 10-second timeout.
+- [ ] **Action/Timeout:** If command detected → fire action LEDs for 2s → reset to Sleep. If 10s timeout → reset to Sleep.
 - [ ] Add a one-shot software timer for command-window timeout (`xTimerStart`, **not** `HAL_Delay`)
 - [ ] Timer is one-shot (not auto-reload): started on entering AWAKE, stopped/reset if command found before it fires
 
