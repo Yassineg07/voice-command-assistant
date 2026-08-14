@@ -33,6 +33,8 @@
 #include "pdm_filter.h"
 #include "stream_buffer.h"
 #include "usart.h"
+#include <math.h>
+#include <stdint.h>
 #include <string.h>
 
 /* USER CODE END Includes */
@@ -59,8 +61,8 @@ uint16_t pdm_rx_buffer[1024];
 StreamBufferHandle_t AudioStreamBuf = NULL;
 
 /* ---- STAI Network Buffers ---- */
-static float ai_input_buf[STAI_NETWORK_IN_1_HEIGHT * STAI_NETWORK_IN_1_WIDTH];
-static float ai_output_buf[STAI_NETWORK_OUT_1_CHANNEL];
+static int8_t ai_input_buf[STAI_NETWORK_IN_1_HEIGHT * STAI_NETWORK_IN_1_WIDTH];
+static int8_t ai_output_buf[STAI_NETWORK_OUT_1_CHANNEL];
 static uint8_t ai_activations[STAI_NETWORK_ACTIVATIONS_SIZE_BYTES]
     __attribute__((aligned(4)));
 static uint8_t ai_network_ctx[STAI_NETWORK_CONTEXT_SIZE]
@@ -425,7 +427,7 @@ void StartTaskAI(void *argument) {
 
   /* LED timer: counts 20ms frames remaining on the current word LED */
   static int led_word_frames_remaining = 0;
-#define LED_WORD_FRAMES 100 // 100 * 20ms = 2 seconds
+#define LED_WORD_FRAMES 250 // 250 * 20ms = 5 seconds
 
   for (;;) {
     /* Block here — truly 0% CPU during silence */
@@ -452,21 +454,12 @@ void StartTaskAI(void *argument) {
       static int capture_frame_count = 0;
 
       static float noise_floor = 0.0f;
-      static int refractory_frames = 0;
       const uint16_t vad_margin = 10;
       const uint16_t vad_min_floor = 20;
 
       int16_t current_vol = 0;
       /* Synchronously pull the exact volume belonging to THIS mfcc frame */
       osMessageQueueGet(VolQueueHandle, &current_vol, NULL, 0);
-
-      // --- Refractory Lockout Penalty ---
-      if (refractory_frames > 0) {
-        refractory_frames--;
-        // While penalized, gently trace the ambient hum with gravity math
-        noise_floor = (noise_floor * 0.95f) + ((float)current_vol * 0.05f);
-        continue;
-      }
 
       // --- Adaptive Threshold Calc ---
       uint16_t dynamic_threshold = (uint16_t)noise_floor + vad_margin;
@@ -505,12 +498,12 @@ void StartTaskAI(void *argument) {
 
         /* End-of-word conditions: 3 quiet frames OR we hit the 900ms overflow
          * limit */
-        int timeout_triggered = (capture_frame_count > 45);
+        int timeout_triggered = (capture_frame_count > 50);
         int silence_triggered = 0;
 
         if (current_vol < dynamic_threshold) {
           quiet_count++;
-          if (quiet_count >= 3)
+          if (quiet_count >= 10)
             silence_triggered = 1;
         } else {
           quiet_count = 0;
@@ -518,11 +511,9 @@ void StartTaskAI(void *argument) {
 
         if (silence_triggered || timeout_triggered) {
           if (timeout_triggered) {
-            printl("[VAD] Max word length hit. Running AI... (2-second penalty "
-                   "applied)\r\n");
+            printl("[VAD] Max word length hit. Running AI... \r\n");
             // The instant-snap recalibration
             noise_floor = (float)current_vol;
-            refractory_frames = 100; // 2 seconds lockout
           } else {
             printl("[VAD] End of word detected. Running AI...\r\n");
           }
@@ -544,28 +535,60 @@ void StartTaskAI(void *argument) {
             if (std < 1e-8f)
               std = 1e-8f;
             for (int t = 0; t < STAI_NETWORK_IN_1_HEIGHT; t++) {
-              ai_input_buf[t * MFCC_NUM_BANDS + b] =
+              float val_f32 =
                   (raw_mel_history[t * MFCC_NUM_BANDS + b] - mean) / std;
+
+              /* Quantize float -> INT8 to match STEDGEAI's input tensor format
+               */
+              int32_t val_s32 =
+                  (int32_t)roundf(val_f32 / STAI_NETWORK_IN_1_SCALE) +
+                  STAI_NETWORK_IN_1_ZERO_POINT;
+              if (val_s32 > 127)
+                val_s32 = 127;
+              if (val_s32 < -128)
+                val_s32 = -128;
+
+              ai_input_buf[t * MFCC_NUM_BANDS + b] = (int8_t)val_s32;
             }
           }
 
           stai_network_run(network, STAI_MODE_SYNC);
 
-          int pct_up = (int)(ai_output_buf[0] * 100);
-          int pct_go = (int)(ai_output_buf[1] * 100);
-          int pct_noise = (int)(ai_output_buf[2] * 100);
-          printl("up:%02d%% go:%02d%% noise:%02d%%\r\n", pct_up, pct_go,
-                 pct_noise);
+          /* STAI Int8 De-quantization: real = (q - zero_point) * scale */
+          float prob_noise =
+              (ai_output_buf[0] - STAI_NETWORK_OUT_1_ZERO_POINT) *
+              STAI_NETWORK_OUT_1_SCALE;
+          float prob_turn_on =
+              (ai_output_buf[1] - STAI_NETWORK_OUT_1_ZERO_POINT) *
+              STAI_NETWORK_OUT_1_SCALE;
+          float prob_unknown =
+              (ai_output_buf[2] - STAI_NETWORK_OUT_1_ZERO_POINT) *
+              STAI_NETWORK_OUT_1_SCALE;
+          float prob_wake_up =
+              (ai_output_buf[3] - STAI_NETWORK_OUT_1_ZERO_POINT) *
+              STAI_NETWORK_OUT_1_SCALE;
+
+          int pct_noise = (int)(prob_noise * 100);
+          int pct_turn_on = (int)(prob_turn_on * 100);
+          int pct_unknown = (int)(prob_unknown * 100);
+          int pct_wake_up = (int)(prob_wake_up * 100);
+
+          printl(
+              "noise:%02d%% turn_on:%02d%% unknown:%02d%% wake_up:%02d%%\r\n",
+              pct_noise, pct_turn_on, pct_unknown, pct_wake_up);
 
           /* --- LED State Machine: drive LEDs based on best prediction --- */
-          if (pct_up > pct_go && pct_up > pct_noise) {
-            /* "up" detected: green LED on, restart 2s timer */
+          /* Note: unknown and noise do not trigger LEDs (just like idle) */
+          if (pct_wake_up > pct_turn_on && pct_wake_up > pct_noise &&
+              pct_wake_up > pct_unknown) {
+            /* "wake_up" detected: green LED on, restart 5s timer */
             HAL_GPIO_WritePin(LED_PORT, LED_GREEN | LED_ORANGE | LED_BLUE,
                               GPIO_PIN_RESET);
             HAL_GPIO_WritePin(LED_PORT, LED_GREEN, GPIO_PIN_SET);
             led_word_frames_remaining = LED_WORD_FRAMES;
-          } else if (pct_go > pct_up && pct_go > pct_noise) {
-            /* "go" detected: orange LED on, restart 2s timer */
+          } else if (pct_turn_on > pct_wake_up && pct_turn_on > pct_noise &&
+                     pct_turn_on > pct_unknown) {
+            /* "turn_on" detected: orange LED on, restart 5s timer */
             HAL_GPIO_WritePin(LED_PORT, LED_GREEN | LED_ORANGE | LED_BLUE,
                               GPIO_PIN_RESET);
             HAL_GPIO_WritePin(LED_PORT, LED_ORANGE, GPIO_PIN_SET);

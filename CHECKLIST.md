@@ -227,12 +227,16 @@ Detailed, phase-by-phase checklist derived from [SPECS.md](./SPECS.md). Check of
 
 > **Goal:** Replace pretrained model with models you trained yourself.
 
-### 2a.1 — Command Model
-- [ ] Collect and prepare dataset (Google Speech Commands + your own voice recordings)
-- [ ] Design and train command model (DS-CNN, Keras)
-- [ ] Convert to `.tflite` with INT8 quantization
-- [ ] Deploy via STM32Cube AI Studio → C files → CubeIDE
-- [ ] Verify parity mapping: Python `1e-8f` dataset generation meticulously mapped against MCU BSS arrays!
+### 2a.1 — Custom KWS Pipeline Setup
+- [✔] Standardize Python scripts into portable `run_1` to `run_7` pipeline
+- [✔] Integrate Edge-TTS for synthetic voice augmentation (16+ neural voices)
+- [✔] Compute a strict 80/20 training/validation split for Synth & Real datasets
+- [✔] Train custom 4-class Keras model (`noise`, `unknown`, `wake_up`, `turn_on`)
+- [✔] Validate model on Live Microphone Script (STM32 DSP clones)
+- [✔] Convert to fully-quantized INT8 `ei_model.tflite`
+- [✔] Deploy via STM32Cube AI Studio → C files → CubeIDE
+- [x] Automate code-gen deployment directly to MCU (`run_8_deploy_to_stm32.py`)
+- [ ] Verify parity mapping against MCU BSS arrays
 
 ### 2a.2 — Wake-Word Model
 - [ ] Record wake-word samples (few hundred utterances, varied distance/angle)

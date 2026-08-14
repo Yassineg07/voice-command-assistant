@@ -1,10 +1,15 @@
-# Build outputs (matches directories in any subfolder)
+# =============================================================================
+# STM32CubeIDE & Embedded Build Outputs
+# =============================================================================
 Debug/
 Release/
 build/
+bin/
+obj/
 
-# Intermediate build and output files
+# Compiler and Linker Artifacts
 *.o
+*.obj
 *.d
 *.su
 *.list
@@ -12,23 +17,100 @@ build/
 *.bin
 *.hex
 *.map
+*.axf
+
+# IDE & Toolchain Metadata / Project Files
+*.launch
+.metadata/
+.settings/
+.mxproject
+*.pbi
+*.pbd
+*.browse
+
+# Temporary and Backup Files (including CubeMX auto-backups)
 *.log
 *.bak
 *.tmp
-
-# STM32CubeIDE / Eclipse specific artifacts
-*.launch
-.metadata/
-.mxproject
-
-# OS generated files
-.DS_Store
-Thumbs.db
-
-# Agent config files
-AGENT.md
-
-# others
-speech_model/
+*.temp
+*~
+*.swp
+Backup/
+**/Backup/
 backup/
-training/
+
+# Compressed Archives & Large Packages
+*.rar
+*.zip
+*.7z
+*.tar
+*.tar.gz
+*.tgz
+
+# =============================================================================
+# Python & Machine Learning
+# =============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Jupyter & Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# Datasets & Temporary Audio Files
+dataset/
+dataset_test/
+dataset_baseline/
+temp_*/
+**/temp_*/
+*.wav
+*.mp3
+*.flac
+*.ogg
+
+# Training Checkpoints & Large Model Files
+*.tflite
+*.h5
+*.keras
+*.ckpt
+*.ckpt.*
+*.savedmodel/
+
+# Experimental / Legacy Model Dumps
+2 custom keywords/
+**/2 custom keywords/
+up and go model/
+**/up and go model/
+speech_model/
+**/speech_model/
+custom_model.tflite-STM32F407G-DISC1-code/
+**/custom_model.tflite-STM32F407G-DISC1-code/
+
+# =============================================================================
+# Operating System & Editor Artifacts
+# =============================================================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# Optional: Editor settings and testing
+.vscode/
+.idea/
+mic_test/

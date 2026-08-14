@@ -4,6 +4,18 @@ All notable progress on the project is recorded here.
 
 ---
 
+## [2026-07-28] — Portable KWS Training Pipeline (Phase 2a)
+
+### Script Architecture Refactoring (`training/`)
+- **Consolidated Pipeline**: Standardized all training scripts into a portable, linear 7-step execution flow (`run_1` to `run_7`), completely documented via `README.md`.
+- **Local Neural Network Training**: Bypassed Edge Impulse's cloud compiler entirely. Shifted to a local Keras deployment that mathematically enforces absolute 1:1 parity with the STM32's `mfcc.c` (Melspectrogram + Z-Score).
+- **Advanced Synthetic Overhaul (`run_3`)**: Replaced `gTTS` with Microsoft Azure's `edge-tts`. Injected 16 diverse neural voice actors across varying dialects, ages, and genders, completely preventing the acoustic overfitting seen in earlier iterations.
+- **Dataset Isolation (`run_4`)**: Built a strictly protected folder structure. `run_4` forces a mathematically independent 80/20 train/test split across *both* synthetic voices and user-provided real recordings asynchronously, safeguarding validation integrity.
+- **Quantization Compatibility (`run_7`)**: Built a TensorFlow Lite representative dataset generator, enforcing strict `TFLITE_BUILTINS_INT8` bounds to guarantee immediate firmware drop-in compatibility with STM32Cube.AI Studio.
+- **Embedded Auto-Deploy (`run_8`)**: Implemented an automated bridge script that directly moves generated STEDGEAI `.c/.h` target arrays into the active firmware directory.
+
+---
+
 ## [2026-07-26] — AI Pipeline Fully Stabilized & Production-Hardened
 
 ### Pipeline Math Fixes (`mfcc.h`, `mfcc.c`)
